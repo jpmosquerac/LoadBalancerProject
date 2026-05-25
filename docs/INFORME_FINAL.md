@@ -1,11 +1,11 @@
-# INFORME DE PROYECTO: IMPLANTACIÓN DE UN BALANCEADOR DE CARGA EN AWS
+# INFORME DE PROYECTO: IMPLEMENTACIÓN DE UN BALANCEADOR DE CARGA EN AWS
 
 ---
 
 ## PORTADA
 
 **Título del Proyecto**
-Implantación de un Balanceador de Carga en AWS CloudFormation
+Implementación de un Balanceador de Carga en AWS CloudFormation
 
 **Asignatura**
 Introducción a la Computación de Alto Desempeño (ICAD)

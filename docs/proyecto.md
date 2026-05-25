@@ -1,4 +1,4 @@
-# Plan de Trabajo Autónomo: Implantación de un Balanceador de Carga
+# Plan de Trabajo Autónomo: Implementación de un Balanceador de Carga
 **Asignatura:** Introducción a la Computación de Alto Desempeño (ICAD)  
 **Programa:** Especialización en Arquitectura Empresarial de Software  
 **Facultad:** Facultad de Ingeniería, Pontificia Universidad Javeriana  
