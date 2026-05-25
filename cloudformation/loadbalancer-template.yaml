@@ -1,0 +1,385 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Load Balancer Project - ICAD'
+
+Parameters:
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 Key Pair for SSH access
+
+Mappings:
+  RegionMap:
+    us-east-1:
+      AMI: ami-0c02fb55956c7d316
+    us-west-2:
+      AMI: ami-0a8e758f5e873d1c1
+    eu-west-1:
+      AMI: ami-0d2a4a5d69e46ea0b
+
+Resources:
+  # ==================== VPC ====================
+  LBVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: LoadBalancer-VPC
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: LoadBalancer-IGW
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref LBVpc
+      InternetGatewayId: !Ref InternetGateway
+
+  # ==================== SUBNETS ====================
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref LBVpc
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: LoadBalancer-PublicSubnet1
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref LBVpc
+      CidrBlock: 10.0.3.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: LoadBalancer-PrivateSubnet1
+
+  # ==================== ROUTE TABLES ====================
+  PublicRT:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref LBVpc
+      Tags:
+        - Key: Name
+          Value: LoadBalancer-PublicRT
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRT
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRT
+
+  PrivateRT:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref LBVpc
+      Tags:
+        - Key: Name
+          Value: LoadBalancer-PrivateRT
+
+  PrivateSubnetAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRT
+
+  # ==================== SECURITY GROUPS ====================
+  NginxSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: NGINX Load Balancer
+      VpcId: !Ref LBVpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: LoadBalancer-NGINX-SG
+
+  BackendSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Backend Python instances
+      VpcId: !Ref LBVpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref NginxSG
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: LoadBalancer-Backend-SG
+
+  # ==================== BACKEND LAUNCH TEMPLATE ====================
+  # Shared launch template for all 4 backend instances.
+  # Bumping UserData here auto-increments LatestVersionNumber, which
+  # forces replacement of every backend on stack update.
+  BackendLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub '${AWS::StackName}-backend-lt'
+      LaunchTemplateData:
+        ImageId: !FindInMap [RegionMap, !Ref 'AWS::Region', AMI]
+        InstanceType: t3.nano
+        KeyName: !Ref KeyName
+        UserData:
+          Fn::Base64: |
+            #!/bin/bash
+            mkdir -p /opt/app && cd /opt/app
+            cat > app.py << 'EOF'
+            from http.server import HTTPServer, BaseHTTPRequestHandler
+            import socket
+            import json
+
+            HOSTNAME = socket.gethostname()
+            PARTICIPANTS = {
+                '10': 'Juan Pablo Mosquera Cossio',
+                '11': 'Sandra Lorena Rodriguez Diaz',
+                '12': 'Isabela Caceres Palma',
+                '13': 'Julian Felipe Plata Zuñiga',
+            }
+            # hostname format: ip-10-0-3-XX.ec2.internal -> last octet identifies the backend
+            LAST_OCTET = HOSTNAME.split('-')[-1].split('.')[0]
+            PARTICIPANT = PARTICIPANTS.get(LAST_OCTET, 'Unknown')
+
+            class Handler(BaseHTTPRequestHandler):
+                def do_GET(self):
+                    self.send_response(200)
+                    self.send_header('X-Backend-Hostname', HOSTNAME)
+                    self.send_header('X-Backend-Participant', PARTICIPANT)
+                    if self.path == '/health':
+                        self.send_header('Content-type', 'application/json')
+                        self.end_headers()
+                        resp = json.dumps({"status": "ok", "hostname": HOSTNAME, "participant": PARTICIPANT})
+                        self.wfile.write(resp.encode())
+                    else:
+                        html = f'''<!DOCTYPE html><html><head><meta charset="UTF-8"><title>[{HOSTNAME}] {PARTICIPANT}</title><style>*{{margin:0;padding:0;box-sizing:border-box}}body{{font-family:Arial,sans-serif;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:110px 20px 20px}}.banner{{position:fixed;top:0;left:0;right:0;background:#0a0e27;color:#00ff88;padding:18px;text-align:center;font-family:'Courier New',monospace;font-weight:bold;z-index:1000;border-bottom:4px solid #00ff88;box-shadow:0 4px 20px rgba(0,0,0,0.4)}}.banner-label{{font-size:0.8em;color:#888;letter-spacing:3px;margin-bottom:6px}}.banner-host{{font-size:2em;letter-spacing:1px;text-shadow:0 0 12px rgba(0,255,136,0.6)}}.container{{background:white;border-radius:12px;padding:50px 40px;max-width:680px;width:100%;box-shadow:0 8px 32px rgba(0,0,0,0.25);text-align:center}}h1{{margin-bottom:30px;color:#333;font-size:1.8em}}.participant-box{{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:white;padding:40px 30px;border-radius:10px;margin:25px 0}}.participant-label{{font-size:0.9em;letter-spacing:2px;opacity:0.85;margin-bottom:12px}}.participant-name{{font-size:2.2em;font-weight:bold;line-height:1.2}}.status{{display:inline-block;background:#4caf50;color:white;padding:10px 22px;border-radius:20px;font-weight:bold;margin-top:15px}}</style></head><body><div class="banner"><div class="banner-label">▶ SERVIDOR RESPONDIENDO</div><div class="banner-host">{HOSTNAME}</div></div><div class="container"><h1>⚖️ Balanceador de Carga</h1><div class="participant-box"><div class="participant-label">INTEGRANTE ASIGNADO</div><div class="participant-name">{PARTICIPANT}</div></div><span class="status">✓ ACTIVO</span></div></body></html>'''
+                        self.send_header('Content-type', 'text/html; charset=utf-8')
+                        self.end_headers()
+                        self.wfile.write(html.encode())
+
+                def do_HEAD(self):
+                    self.send_response(200)
+                    self.send_header('X-Backend-Hostname', HOSTNAME)
+                    self.send_header('X-Backend-Participant', PARTICIPANT)
+                    self.send_header('Content-type', 'text/html')
+                    self.end_headers()
+
+                def log_message(self, format, *args):
+                    pass
+
+            server = HTTPServer(('0.0.0.0', 8080), Handler)
+            server.serve_forever()
+            EOF
+            nohup python3 app.py > /var/log/backend.log 2>&1 &
+
+  # ==================== NGINX INSTANCE ====================
+  NginxInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !FindInMap [RegionMap, !Ref 'AWS::Region', AMI]
+      InstanceType: t3.nano
+      SubnetId: !Ref PublicSubnet1
+      SecurityGroupIds:
+        - !Ref NginxSG
+      KeyName: !Ref KeyName
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          yum update -y
+          amazon-linux-extras install -y nginx1
+
+          cat > /etc/nginx/nginx.conf << 'NGINX_CONF'
+          user nginx;
+          worker_processes auto;
+          error_log /var/log/nginx/error.log;
+          pid /run/nginx.pid;
+
+          events {
+              worker_connections 768;
+          }
+
+          http {
+              sendfile on;
+              tcp_nopush on;
+              tcp_nodelay on;
+              keepalive_timeout 65;
+              types_hash_max_size 2048;
+              include /etc/nginx/mime.types;
+              default_type application/octet-stream;
+              access_log /var/log/nginx/access.log;
+              gzip on;
+
+              upstream backend_pool {
+                  least_conn;
+                  server 10.0.3.10:8080 max_fails=3 fail_timeout=30s;
+                  server 10.0.3.11:8080 max_fails=3 fail_timeout=30s;
+                  server 10.0.3.12:8080 max_fails=3 fail_timeout=30s;
+                  server 10.0.3.13:8080 max_fails=3 fail_timeout=30s;
+                  keepalive 32;
+              }
+
+              server {
+                  listen 80 default_server;
+                  server_name _;
+                  client_max_body_size 0;
+
+                  location / {
+                      proxy_pass http://backend_pool;
+                      proxy_http_version 1.1;
+                      proxy_set_header Connection "";
+                      proxy_set_header Host $host;
+                      proxy_set_header X-Real-IP $remote_addr;
+                      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                      proxy_connect_timeout 10s;
+                      proxy_send_timeout 30s;
+                      proxy_read_timeout 30s;
+                      proxy_buffering off;
+
+                      # Expose which backend NGINX routed to (visible in response headers)
+                      add_header X-Upstream-Addr $upstream_addr always;
+                      add_header X-Upstream-Status $upstream_status always;
+                      add_header X-Upstream-Response-Time $upstream_response_time always;
+                  }
+
+                  location /health {
+                      access_log off;
+                      return 200 "OK\n";
+                      add_header Content-Type text/plain;
+                  }
+              }
+          }
+          NGINX_CONF
+
+          nginx -t
+          systemctl enable nginx
+          systemctl start nginx
+          echo "NGINX started" >> /var/log/startup.log
+      Tags:
+        - Key: Name
+          Value: loadbalancer-juan-pablo-mosquera
+        - Key: Role
+          Value: NGINX
+
+  # ==================== BACKEND INSTANCES ====================
+  Backend1:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref BackendLaunchTemplate
+        Version: !GetAtt BackendLaunchTemplate.LatestVersionNumber
+      SubnetId: !Ref PrivateSubnet1
+      SecurityGroupIds:
+        - !Ref BackendSG
+      PrivateIpAddress: 10.0.3.10
+      Tags:
+        - Key: Name
+          Value: backend-juan-pablo
+
+  Backend2:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref BackendLaunchTemplate
+        Version: !GetAtt BackendLaunchTemplate.LatestVersionNumber
+      SubnetId: !Ref PrivateSubnet1
+      SecurityGroupIds:
+        - !Ref BackendSG
+      PrivateIpAddress: 10.0.3.11
+      Tags:
+        - Key: Name
+          Value: backend-sandra-lorena
+
+  Backend3:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref BackendLaunchTemplate
+        Version: !GetAtt BackendLaunchTemplate.LatestVersionNumber
+      SubnetId: !Ref PrivateSubnet1
+      SecurityGroupIds:
+        - !Ref BackendSG
+      PrivateIpAddress: 10.0.3.12
+      Tags:
+        - Key: Name
+          Value: backend-isabela
+
+  Backend4:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref BackendLaunchTemplate
+        Version: !GetAtt BackendLaunchTemplate.LatestVersionNumber
+      SubnetId: !Ref PrivateSubnet1
+      SecurityGroupIds:
+        - !Ref BackendSG
+      PrivateIpAddress: 10.0.3.13
+      Tags:
+        - Key: Name
+          Value: backend-julian
+
+Outputs:
+  NginxPublicIP:
+    Description: Public IP of NGINX
+    Value: !GetAtt NginxInstance.PublicIp
+
+  NginxInstanceId:
+    Description: NGINX Instance ID
+    Value: !Ref NginxInstance
+
+  Backend1Id:
+    Description: Backend 1 Instance ID
+    Value: !Ref Backend1
+
+  Backend2Id:
+    Description: Backend 2 Instance ID
+    Value: !Ref Backend2
+
+  Backend3Id:
+    Description: Backend 3 Instance ID
+    Value: !Ref Backend3
+
+  Backend4Id:
+    Description: Backend 4 Instance ID
+    Value: !Ref Backend4
+
+  LoadBalancerURL:
+    Description: URL to access the load balancer
+    Value: !Sub 'http://${NginxInstance.PublicIp}'
